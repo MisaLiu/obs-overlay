@@ -8,6 +8,7 @@ import org.lwjgl.glfw.GLFWFramebufferSizeCallback;
 import org.lwjgl.glfw.GLFWWindowPosCallback;
 import org.lwjgl.glfw.GLFWWindowSizeCallback;
 import org.lwjgl.opengl.GL;
+import org.lwjgl.opengl.GLCapabilities;
 
 import static org.lwjgl.opengl.GL11.*;
 import static org.lwjgl.opengl.GL20.*;
@@ -112,6 +113,20 @@ public class LinuxGLFWHook implements PlatformHook {
      * (positions are generated procedurally in the vertex shader).
      */
     private int blitVao = 0;
+
+    /**
+     * Cached {@link GLCapabilities} for each context.
+     *
+     * <p>{@link GL#createCapabilities()} queries every GL extension string and
+     * resolves thousands of function pointers – it is far too expensive to call
+     * every frame. LWJGL stores capabilities in a {@link ThreadLocal}; after the
+     * first call per context we capture the result with {@link GL#getCapabilities()}
+     * and restore it with {@link GL#setCapabilities(GLCapabilities)} on subsequent
+     * context switches, reducing the per-switch cost to a single {@code ThreadLocal}
+     * write.
+     */
+    private GLCapabilities mainContextCaps   = null;
+    private GLCapabilities secondContextCaps = null;
 
     /**
      * Retained references to the GLFW callbacks registered on the main window
@@ -259,17 +274,30 @@ public class LinuxGLFWHook implements PlatformHook {
         // VAOs and shader programs are context-local objects. They must be created
         // while the secondary context is current.
         GLFW.glfwMakeContextCurrent(secondWindowHandle);
-        GL.createCapabilities();
+        // createCapabilities() is expensive (queries all GL extensions); call it
+        // once here and cache the result for use in presentFrame().
+        secondContextCaps = GL.createCapabilities();
+
+        // Disable VSync on the secondary context.
+        // glfwSwapInterval acts on the *current* context. A freshly created context
+        // has an undefined (often driver-default = 1) swap interval. If we leave it
+        // at 1, every glfwSwapBuffers(secondWindow) in presentFrame() blocks for a
+        // full VBlank, effectively halving the game's maximum framerate because the
+        // main window's own VSync wait then stacks on top. Setting it to 0 lets the
+        // secondary swap return immediately; VSync for the main window is controlled
+        // exclusively by Minecraft's own glfwSwapInterval call.
+        GLFW.glfwSwapInterval(0);
 
         if (!buildSecondaryContextResources()) {
             GLFW.glfwMakeContextCurrent(mainWindowHandle);
-            GL.createCapabilities();
+            mainContextCaps = GL.createCapabilities();
             return false;
         }
 
         // Restore Minecraft's main context before returning to the caller.
+        // Cache its capabilities for cheap restoration in presentFrame().
         GLFW.glfwMakeContextCurrent(mainWindowHandle);
-        GL.createCapabilities();
+        mainContextCaps = GL.createCapabilities();
 
         OBSOverlay.LOGGER.info("[LinuxGLFWHook] Secondary GLFW window created (handle={})",
                 secondWindowHandle);
@@ -340,20 +368,29 @@ public class LinuxGLFWHook implements PlatformHook {
      * Called at the end of every rendered frame by the Mixin injection on
      * {@code MinecraftClient.render(Z)V RETURN}.
      *
-     * <p>Workflow:
-     * <ol>
-     *   <li>Flush any pending GL commands so the overlay texture is fully written.</li>
-     *   <li>Switch to the secondary window's context.</li>
-     *   <li>Synchronise the GL viewport with the current framebuffer size.</li>
-     *   <li>Clear to transparent and draw the overlay texture with the
-     *       secondary-context-local shader + VAO.</li>
-     *   <li>Swap the secondary window's buffers.</li>
-     *   <li>Restore Minecraft's main context.</li>
-     *   <li>Poll GLFW events to keep the secondary window responsive.</li>
-     * </ol>
+     * <p>Performance notes:
+     * <ul>
+     *   <li>{@code glfwMakeContextCurrent} performs an implicit GL flush on the
+     *       outgoing context per the OpenGL spec, so no explicit {@code glFlush()}
+     *       is needed before the switch.</li>
+     *   <li>Capabilities are restored with {@link GL#setCapabilities} (a single
+     *       {@code ThreadLocal} write) instead of {@link GL#createCapabilities}
+     *       (thousands of extension queries), using the instances cached during
+     *       {@link #initialize}.</li>
+     *   <li>{@code glfwPollEvents()} is omitted here because
+     *       {@code RenderSystem.flipFrame()} already calls it twice per frame
+     *       (before and after the main window swap). Our position/size callbacks
+     *       are dispatched during those calls.</li>
+     *   <li>The secondary window's swap interval is 0 (set in {@link #initialize}),
+     *       so {@code glfwSwapBuffers(secondWindow)} returns immediately without
+     *       blocking on a VBlank, which would otherwise cap the game's framerate
+     *       at the monitor refresh rate.</li>
+     * </ul>
      */
     @Override
-    public void presentFrame() {
+    public void presentFrame(boolean dirty) {
+        if (!dirty) return;  // overlay unchanged this frame – skip context switch entirely
+
         if (secondWindowHandle == 0L) return;
         if (blitProgram == 0 || blitVao == 0) return;
         if (OverlayRenderer.getOverlayFramebuffer() == null) return;
@@ -361,24 +398,18 @@ public class LinuxGLFWHook implements PlatformHook {
         int overlayTexture = OverlayRenderer.getOverlayFramebuffer().getColorAttachment();
         if (overlayTexture == 0) return;
 
-        // Use the secondary window's own framebuffer size for glViewport.
-        // This is the pixel resolution of the secondary window's framebuffer, which
-        // may differ from the main window's framebuffer size on HiDPI displays or
-        // when the two windows are on monitors with different DPI settings.
-        // Using the main window's framebuffer size here would cause the rendered
-        // content to be scaled incorrectly and break mouse coordinate mapping.
         int vpWidth  = secondFbWidth;
         int vpHeight = secondFbHeight;
         if (vpWidth == 0 || vpHeight == 0) return;
 
-        // Step 1 – flush pending overlay writes before switching context.
-        glFlush();
-
-        // Step 2 – switch to the secondary window's context.
+        // Switch to the secondary window's context.
+        // glfwMakeContextCurrent implicitly flushes the outgoing context's command
+        // queue per the OpenGL spec – no explicit glFlush() is needed beforehand.
         GLFW.glfwMakeContextCurrent(secondWindowHandle);
-        GL.createCapabilities();
+        // Restore cached capabilities – O(1) ThreadLocal write, not a full query.
+        GL.setCapabilities(secondContextCaps);
 
-        // Step 3 – draw the overlay texture.
+        // Draw the overlay texture to the secondary window's back buffer.
         glViewport(0, 0, vpWidth, vpHeight);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -388,13 +419,12 @@ public class LinuxGLFWHook implements PlatformHook {
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
         glUseProgram(blitProgram);
-
-        // The texture object is shared (context sharing), so its ID is valid here.
+        // Texture is shared via context sharing – the ID is valid in this context.
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, overlayTexture);
         glUniform1i(texUniformLocation, 0);
 
-        // Full-screen triangle: 3 vertices, positions generated in the vertex shader.
+        // Full-screen triangle: positions generated in the vertex shader via gl_VertexID.
         glBindVertexArray(blitVao);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glBindVertexArray(0);
@@ -402,17 +432,16 @@ public class LinuxGLFWHook implements PlatformHook {
         glUseProgram(0);
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        // Step 4 – present, making the frame visible to the user and OBS.
+        // Present – swap interval is 0 so this returns immediately (no VBlank wait).
         GLFW.glfwSwapBuffers(secondWindowHandle);
 
-        // Step 5 – restore Minecraft's main context.
+        // Restore Minecraft's main context.
         GLFW.glfwMakeContextCurrent(mainWindowHandle);
-        GL.createCapabilities();
+        GL.setCapabilities(mainContextCaps);
 
-        // Step 6 – poll events to keep the secondary window responsive.
-        // This also dispatches the position/size callbacks registered above if
-        // Minecraft's window moved or resized since the last poll.
-        GLFW.glfwPollEvents();
+        // glfwPollEvents() is intentionally omitted: RenderSystem.flipFrame() already
+        // calls it twice per frame (before and after glfwSwapBuffers on the main window).
+        // Calling it again here would redundantly re-process the event queue.
     }
 
     @Override

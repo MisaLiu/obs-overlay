@@ -115,10 +115,16 @@ public class OverlayRenderer {
      * to present the overlay framebuffer to its secondary window (Linux GLFW path).
      * This is a no-op for hook-based platforms (Windows) where presentation is
      * driven by the intercepted swap call.
+     *
+     * <p>Passes the current {@code framebufferDirty} flag to the hook so that
+     * implementations can skip an expensive context-switch + blit + swap cycle
+     * when the overlay content has not changed since the last frame.
      */
     public static void presentFrame() {
         if (platformHook != null) {
-            platformHook.presentFrame();
+            boolean dirty = framebufferDirty;
+            framebufferDirty = false;
+            platformHook.presentFrame(dirty);
         }
     }
 
