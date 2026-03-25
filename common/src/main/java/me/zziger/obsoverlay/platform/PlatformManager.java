@@ -12,7 +12,7 @@ public class PlatformManager {
             if (os.contains("win")) {
                 instance = new WindowsHook();
             } else if (os.contains("nux") || os.contains("nix")) {
-                instance = new LinuxHook();
+                instance = new LinuxGLFWHook();
             } else {
                 OBSOverlay.LOGGER.error("Unsupported operating system: " + os);
                 instance = new UnsupportedHook();

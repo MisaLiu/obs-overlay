@@ -5,6 +5,15 @@ import net.minecraft.client.MinecraftClient;
 public interface PlatformHook {
     boolean initialize(MinecraftClient client);
     void setRenderCallback(Runnable callback);
+
+    /**
+     * Called at the end of each rendered frame (via Mixin on MinecraftClient.render RETURN).
+     * Platform implementations that manage their own presentation window (e.g. Linux GLFW)
+     * should blit the overlay framebuffer to their secondary window here.
+     * The default no-op is suitable for hook-based implementations (e.g. Windows wglSwapBuffers).
+     */
+    default void presentFrame() {}
+
     boolean isSupported();
     String getPlatformName();
 }

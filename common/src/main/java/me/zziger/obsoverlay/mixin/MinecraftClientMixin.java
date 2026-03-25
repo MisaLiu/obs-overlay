@@ -24,4 +24,9 @@ public class MinecraftClientMixin {
     private void onRender(boolean tick, CallbackInfo ci) {
         OverlayRenderer.beginFrame();
     }
+
+    @Inject(method = "render(Z)V", at = @At("RETURN"))
+    private void onRenderEnd(boolean tick, CallbackInfo ci) {
+        OverlayRenderer.presentFrame();
+    }
 }

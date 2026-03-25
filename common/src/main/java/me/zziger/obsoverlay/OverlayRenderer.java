@@ -65,28 +65,60 @@ public class OverlayRenderer {
         overlayFramebuffer.clear(IS_SYSTEM_MAC);
     }
 
-    private static void renderFrame() {
-        MinecraftClient client = MinecraftClient.getInstance();
+    /**
+     * Returns the overlay framebuffer, or null if not yet initialized.
+     * Intended for platform hooks that need direct access to the color attachment.
+     */
+    public static Framebuffer getOverlayFramebuffer() {
+        return overlayFramebuffer;
+    }
 
+    /**
+     * Blits the overlay framebuffer to the currently active GL context using the blit screen shader.
+     * The caller is responsible for setting up an appropriate viewport beforehand.
+     * This method is a no-op if the overlay framebuffer is null or has not been written to.
+     */
+    public static void blitOverlayToCurrentContext(int viewportWidth, int viewportHeight) {
+        if (overlayFramebuffer == null) return;
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        GlStateManager._disableDepthTest();
+        GlStateManager._enableBlend();
+        GlStateManager._blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        GlStateManager._viewport(0, 0, viewportWidth, viewportHeight);
+
+        ShaderProgram shaderProgram = (ShaderProgram) Objects.requireNonNull(
+                client.gameRenderer.blitScreenProgram, "Blit shader not loaded");
+        shaderProgram.addSampler("DiffuseSampler", overlayFramebuffer.getColorAttachment());
+        shaderProgram.bind();
+        BufferBuilder bufferBuilder = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.BLIT_SCREEN);
+        bufferBuilder.vertex(0.0F, 0.0F, 0.0F);
+        bufferBuilder.vertex(1.0F, 0.0F, 0.0F);
+        bufferBuilder.vertex(1.0F, 1.0F, 0.0F);
+        bufferBuilder.vertex(0.0F, 1.0F, 0.0F);
+        BufferRenderer.draw(bufferBuilder.end());
+        shaderProgram.unbind();
+    }
+
+    private static void renderFrame() {
         if (overlayFramebuffer != null && framebufferDirty) {
             framebufferDirty = false;
+            MinecraftClient client = MinecraftClient.getInstance();
+            blitOverlayToCurrentContext(
+                    client.getWindow().getFramebufferWidth(),
+                    client.getWindow().getFramebufferHeight());
+        }
+    }
 
-            GlStateManager._disableDepthTest();
-            GlStateManager._enableBlend();
-            GlStateManager._blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            GlStateManager._viewport(0, 0, client.getWindow().getFramebufferWidth(), client.getWindow().getFramebufferHeight());
-
-            MinecraftClient minecraftClient = MinecraftClient.getInstance();
-            ShaderProgram shaderProgram = (ShaderProgram) Objects.requireNonNull(minecraftClient.gameRenderer.blitScreenProgram, "Blit shader not loaded");
-            shaderProgram.addSampler("DiffuseSampler", overlayFramebuffer.getColorAttachment());
-            shaderProgram.bind();
-            BufferBuilder bufferBuilder = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.BLIT_SCREEN);
-            bufferBuilder.vertex(0.0F, 0.0F, 0.0F);
-            bufferBuilder.vertex(1.0F, 0.0F, 0.0F);
-            bufferBuilder.vertex(1.0F, 1.0F, 0.0F);
-            bufferBuilder.vertex(0.0F, 1.0F, 0.0F);
-            BufferRenderer.draw(bufferBuilder.end());
-            shaderProgram.unbind();
+    /**
+     * Called at the end of each frame to give the active platform hook a chance
+     * to present the overlay framebuffer to its secondary window (Linux GLFW path).
+     * This is a no-op for hook-based platforms (Windows) where presentation is
+     * driven by the intercepted swap call.
+     */
+    public static void presentFrame() {
+        if (platformHook != null) {
+            platformHook.presentFrame();
         }
     }
 

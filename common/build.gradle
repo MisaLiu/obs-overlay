@@ -2,19 +2,11 @@ architectury {
     common rootProject.enabled_platforms.split(',')
 }
 
-task buildLinuxNative(type: Exec) {
-    description = 'Build Linux native library'
-    group = 'build'
-    
-    workingDir = file('../native/linux')
-    commandLine 'bash', './build.sh'
-    
-    onlyIf {
-        System.getProperty('os.name').toLowerCase().contains('nux')
-    }
+processResources {
+    // glx_hook.so is no longer used; the Linux platform hook now uses GLFW
+    // context sharing instead of a native GLX hook library.
+    exclude 'lib/glx_hook.x64.so'
 }
-
-processResources.dependsOn buildLinuxNative
 
 dependencies {
     // We depend on Fabric Loader here to use the Fabric @Environment annotations,
