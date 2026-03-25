@@ -11,7 +11,7 @@
 ## Installation
 
 This mod is **client-only**.\
-At the moment only **Windows** is supported.
+Supported platforms: **Windows** and **Linux** (X11).
 
 ### Dependencies
 
