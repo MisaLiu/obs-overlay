@@ -2,11 +2,8 @@ package me.zziger.obsoverlay;
 
 import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.sun.jna.Function;
-import com.sun.jna.Pointer;
-import com.sun.jna.ptr.PointerByReference;
-import me.zziger.obsoverlay.modules.Kernel32;
-import me.zziger.obsoverlay.modules.MinHook;
+import me.zziger.obsoverlay.platform.PlatformHook;
+import me.zziger.obsoverlay.platform.PlatformManager;
 import me.zziger.obsoverlay.registry.OverlayComponent;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
@@ -20,7 +17,7 @@ import static net.minecraft.client.MinecraftClient.IS_SYSTEM_MAC;
 import static org.lwjgl.opengl.GL11.*;
 
 public class OverlayRenderer {
-    private static PointerByReference reference;
+    private static PlatformHook platformHook;
     private static boolean framebufferDirty = false;
     private static Framebuffer overlayFramebuffer = null;
 
@@ -94,30 +91,25 @@ public class OverlayRenderer {
     }
 
     public static void init(MinecraftClient client) {
-        if (!OBSOverlay.libraryInitialized) return;
+        platformHook = PlatformManager.getInstance();
+        
+        if (!platformHook.isSupported()) {
+            OBSOverlay.LOGGER.error("OBS Overlay is not supported on " + platformHook.getPlatformName());
+            return;
+        }
 
         overlayFramebuffer = new SimpleFramebuffer(client.getWindow().getFramebufferWidth(), client.getWindow().getFramebufferHeight(), true, IS_SYSTEM_MAC);
         RenderSystem.clearColor(0, 0, 0, 0);
         overlayFramebuffer.setClearColor(0, 0, 0, 0);
         overlayFramebuffer.clear(IS_SYSTEM_MAC);
 
-        Pointer module = Kernel32.INSTANCE.GetModuleHandleA("opengl32.dll");
-        Pointer proc = Kernel32.INSTANCE.GetProcAddress(module, "wglSwapBuffers");
-
-        try {
-            MinHook minhook = MinHookManager.GetInstance();
-            minhook.MH_Initialize();
-            reference = new PointerByReference();
-
-            minhook.MH_CreateHook(proc, hDc -> {
-                renderFrame();
-                Function origFunction = Function.getFunction(reference.getValue(), Function.ALT_CONVENTION);
-                return (boolean) origFunction.invoke(Boolean.class, new Object[]{hDc});
-            }, reference);
-            minhook.MH_EnableHook(proc);
-        } catch(Exception e) {
-            OBSOverlay.LOGGER.error("Failed to initialize MinHook");
-            OBSOverlay.libraryInitialized = false;
+        platformHook.setRenderCallback(OverlayRenderer::renderFrame);
+        
+        if (platformHook.initialize(client)) {
+            OBSOverlay.libraryInitialized = true;
+            OBSOverlay.LOGGER.info("OBS Overlay initialized successfully on " + platformHook.getPlatformName());
+        } else {
+            OBSOverlay.LOGGER.error("Failed to initialize OBS Overlay on " + platformHook.getPlatformName());
             overlayFramebuffer = null;
         }
     }
