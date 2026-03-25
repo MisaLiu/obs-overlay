@@ -9,6 +9,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
 import net.minecraft.client.gl.ShaderProgram;
 import net.minecraft.client.gl.SimpleFramebuffer;
+import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.render.*;
 
 import java.util.Objects;
@@ -21,12 +22,42 @@ public class OverlayRenderer {
     private static boolean framebufferDirty = false;
     private static Framebuffer overlayFramebuffer = null;
 
+    /**
+     * The real main framebuffer, cached at init time.
+     *
+     * <p>We cache this reference because {@code MinecraftClient.getFramebuffer()} can
+     * be intercepted by mods such as Exordium, which temporarily redirect it to their
+     * own per-component FBO during a capture window. If we called
+     * {@code getFramebuffer()} inside {@code endDraw()} we might restore the wrong
+     * FBO as the draw target, leaving subsequent rendering in an incorrect state and
+     * causing flicker or missing content in the overlay framebuffer.
+     */
+    private static Framebuffer mainFramebuffer = null;
+
+    /**
+     * Whether the overlay framebuffer has already been cleared at least once in the
+     * current frame. The clear is deferred to the first actual {@link #beginDraw()}
+     * call so that frames where no HUD component writes anything (e.g. Exordium or
+     * Dynamic FPS skip frames) do not erase the content from the previous rendered
+     * frame, which would cause the overlay window to flicker.
+     */
+    private static boolean frameCleared = false;
+
     public static void markFramebufferDirty() {
         framebufferDirty = true;
     }
 
     public static void beginDraw() {
         if (overlayFramebuffer == null) return;
+        // Lazy-clear: only clear the framebuffer on the very first beginDraw() of
+        // each frame. Subsequent calls within the same frame skip the clear so that
+        // earlier components already written are preserved. Frames in which no
+        // component calls beginDraw() keep the content from the last rendered frame.
+        if (!frameCleared) {
+            overlayFramebuffer.setClearColor(0, 0, 0, 0);
+            overlayFramebuffer.clear(IS_SYSTEM_MAC);
+            frameCleared = true;
+        }
         overlayFramebuffer.beginWrite(false);
         framebufferDirty = true;
     }
@@ -35,34 +66,46 @@ public class OverlayRenderer {
         MinecraftClient.getInstance().getFramebuffer().endWrite();
     }
 
-    public static void beginDraw(OverlayComponent component) {
+    public static void beginDraw(OverlayComponent component, DrawContext context) {
         if (!component.isOverlayEnabled()) return;
-        component.beforeBeginDraw();
+        component.beforeBeginDraw(context);
         if (component.isHidden()) beginEmptyDraw();
         else beginDraw();
     }
 
     public static void endDraw() {
         if (overlayFramebuffer == null) return;
-        MinecraftClient.getInstance().getFramebuffer().beginWrite(false);
+        // Restore the real main framebuffer directly via the cached reference.
+        // Do NOT use MinecraftClient.getFramebuffer() here: mods like Exordium
+        // intercept that call and may return their own FBO during a capture window,
+        // which would leave the draw target in the wrong state.
+        if (mainFramebuffer != null) {
+            mainFramebuffer.beginWrite(false);
+        } else {
+            MinecraftClient.getInstance().getFramebuffer().beginWrite(false);
+        }
         framebufferDirty = true;
     }
 
-    public static void endDraw(OverlayComponent component) {
+    public static void endDraw(OverlayComponent component, DrawContext context) {
         if (!component.isOverlayEnabled()) return;
-        component.beforeEndDraw();
+        component.beforeEndDraw(context);
         endDraw();
     }
 
     public static void onResolutionChanged(MinecraftClient client) {
         if (overlayFramebuffer == null) return;
+        // Refresh the main framebuffer reference: Minecraft recreates it on resize.
+        mainFramebuffer = client.getFramebuffer();
         overlayFramebuffer.resize(client.getWindow().getFramebufferWidth(), client.getWindow().getFramebufferHeight(), IS_SYSTEM_MAC);
     }
 
     public static void beginFrame() {
-        if (overlayFramebuffer == null) return;
-        overlayFramebuffer.setClearColor(0, 0, 0, 0);
-        overlayFramebuffer.clear(IS_SYSTEM_MAC);
+        // Reset the lazy-clear flag. The actual clear of overlayFramebuffer is
+        // deferred to the first beginDraw() call of the frame so that frames in
+        // which Exordium / Dynamic FPS / similar mods skip HUD rendering do not
+        // wipe the framebuffer content, which would cause the overlay to flicker.
+        frameCleared = false;
     }
 
     /**
@@ -135,6 +178,9 @@ public class OverlayRenderer {
             OBSOverlay.LOGGER.error("OBS Overlay is not supported on " + platformHook.getPlatformName());
             return;
         }
+
+        // Cache the real main framebuffer before any mod can intercept getFramebuffer().
+        mainFramebuffer = client.getFramebuffer();
 
         overlayFramebuffer = new SimpleFramebuffer(client.getWindow().getFramebufferWidth(), client.getWindow().getFramebufferHeight(), true, IS_SYSTEM_MAC);
         RenderSystem.clearColor(0, 0, 0, 0);

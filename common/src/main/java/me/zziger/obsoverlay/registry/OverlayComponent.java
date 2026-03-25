@@ -46,12 +46,20 @@ public interface OverlayComponent {
     boolean isHidden();
 
     /**
-     * Invoked before beginDraw
+     * Invoked before beginDraw.
+     *
+     * @param context the current {@link net.minecraft.client.gui.DrawContext}; used to
+     *                flush any pending ImmediatelyFast batched draws before the render
+     *                target is switched to the overlay framebuffer
      */
-    default void beforeBeginDraw() {};
+    default void beforeBeginDraw(net.minecraft.client.gui.DrawContext context) {};
 
     /**
-     * Invoked before endDraw
+     * Invoked before endDraw.
+     *
+     * @param context the current {@link net.minecraft.client.gui.DrawContext}; used to
+     *                flush any pending ImmediatelyFast batched draws before the render
+     *                target is switched back to the main framebuffer
      */
-    default void beforeEndDraw() {};
+    default void beforeEndDraw(net.minecraft.client.gui.DrawContext context) {};
 }
